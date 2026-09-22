@@ -1,0 +1,470 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Sep  3 12:20:24 2026
+
+@author: lrobledo
+"""
+"Cheby Lowpass con FIR a 20KHz"
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import numpy as np
+import scipy.signal as sig
+import matplotlib.pyplot as plt
+
+
+# ============================================================
+# ESPECIFICACIONES DEL FILTRO
+# ============================================================
+
+fs = 20000.0
+f_nyquist = fs / 2
+
+fp = 100.0
+fstop = 300.0
+
+gpass = 1.0
+gstop = 60.0
+
+
+# ============================================================
+# BUSQUEDA DEL NUMERO MINIMO DE TAPS
+# ============================================================
+
+# Frecuencia de corte utilizada para el FIR.
+# Se coloca aproximadamente en el medio de la transición.
+
+fc = (fp + fstop) / 2
+
+
+taps_encontrados = None
+
+for numtaps in range(3, 2001, 2):
+
+    # Diseño FIR
+    taps = sig.firwin(
+        numtaps=numtaps,
+        cutoff=fc,
+        window='hamming',
+        fs=fs,
+        pass_zero='lowpass'
+    )
+
+    # Respuesta en frecuencia
+    w, h = sig.freqz(
+        taps,
+        worN=16384,
+        fs=fs
+    )
+
+    H_dB = 20 * np.log10(
+        np.maximum(np.abs(h), 1e-12)
+    )
+
+    # Banda pasante
+    idx_pass = w <= fp
+
+    # Banda de rechazo
+    idx_stop = w >= fstop
+
+    # Ripple / atenuación máxima en pasabanda
+    max_atten_pass = -np.min(H_dB[idx_pass])
+
+    # Atenuación mínima en stopband
+    min_atten_stop = -np.max(H_dB[idx_stop])
+
+    # Verificar especificaciones
+    if (
+        max_atten_pass <= gpass
+        and
+        min_atten_stop >= gstop
+    ):
+        taps_encontrados = taps
+        orden = numtaps - 1
+
+        break
+
+
+# ============================================================
+# RESULTADOS
+# ============================================================
+
+if taps_encontrados is None:
+
+    print("No se encontró un filtro que cumpla las especificaciones.")
+
+else:
+
+    taps = taps_encontrados
+
+    print("==============================================")
+    print(" FILTRO FIR")
+    print("==============================================")
+
+    print(f"Frecuencia de muestreo = {fs:.1f} Hz")
+    print(f"Frecuencia de Nyquist   = {f_nyquist:.1f} Hz")
+    print(f"Frecuencia pasante      = {fp:.1f} Hz")
+    print(f"Frecuencia de rechazo   = {fstop:.1f} Hz")
+    print(f"Ripple permitido        = {gpass:.1f} dB")
+    print(f"Atenuación mínima       = {gstop:.1f} dB")
+
+    print(f"\nOrden del filtro        = {orden}")
+    print(f"Cantidad de taps       = {len(taps)}")
+
+    print("\nCoeficientes FIR:")
+    print(taps)
+
+
+    # ========================================================
+    # RESPUESTA EN FRECUENCIA
+    # ========================================================
+
+    w, h = sig.freqz(
+        taps,
+        worN=16384,
+        fs=fs
+    )
+
+    H_dB = 20 * np.log10(
+        np.maximum(np.abs(h), 1e-12)
+    )
+
+
+    # ========================================================
+    # FRECUENCIAS NORMALIZADAS
+    # ========================================================
+
+    w_normalizada = w / f_nyquist
+
+    fp_normalizada = fp / f_nyquist
+    fstop_normalizada = fstop / f_nyquist
+
+
+    # ========================================================
+    # GRAFICA
+    # ========================================================
+
+    plt.figure(figsize=(10, 6))
+
+    plt.plot(
+        w_normalizada,
+        H_dB,
+        label='FIR'
+    )
+
+    plt.axvline(
+        fp_normalizada,
+        linestyle='--',
+        label='fp = 100 Hz'
+    )
+
+    plt.axvline(
+        fstop_normalizada,
+        linestyle='--',
+        label='fstop = 300 Hz'
+    )
+
+    plt.axhline(
+        -gpass,
+        linestyle=':',
+        label='-1 dB'
+    )
+
+    plt.axhline(
+        -gstop,
+        linestyle=':',
+        label='-60 dB'
+    )
+
+    plt.title('Filtro FIR - Lowpass')
+
+    plt.xlabel(
+        'Frecuencia normalizada respecto de Nyquist'
+    )
+
+    plt.ylabel(
+        'Magnitud [dB]'
+    )
+
+    plt.xlim(0, 1)
+    plt.ylim(-100, 5)
+
+    plt.grid(True)
+    plt.legend()
+
+    plt.show()
+
+
+    # ========================================================
+    # FORMATO PARA STM32 / CMSIS-DSP
+    # ========================================================
+
+    print("\n==============================================")
+    print(" COEFICIENTES PARA STM32")
+    print("==============================================")
+
+    print("\nfloat32_t float_fir_taps[] =")
+    print("{")
+
+    for i, c in enumerate(taps):
+
+        if i < len(taps) - 1:
+            print(f"    {c:.10e}f,")
+        else:
+            print(f"    {c:.10e}f")
+
+    print("};")
+    
+    
+    
+    #%%
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Diseño de filtro FIR pasa-bajos con respuesta tipo CHEBYSHEV
+(ventana Dolph-Chebyshev) + generación de coeficientes en formato C
+para CMSIS-DSP (arm_fir_f32)
+"""
+
+import numpy as np
+import scipy.signal as sig
+import matplotlib.pyplot as plt
+
+
+# ============================================================
+# ESPECIFICACIONES DEL FILTRO
+# ============================================================
+
+fs = 20000.0          # Frecuencia de muestreo [Hz]
+f_nyquist = fs / 2
+
+fp = 100.0             # Fin de banda pasante [Hz]
+fstop = 300.0          # Inicio de banda de rechazo [Hz]
+
+gpass = 1.0            # Ripple máximo en banda pasante [dB] (referencia)
+gstop = 60.0           # Atenuación mínima en banda de rechazo [dB]
+
+
+# ============================================================
+# ESTIMACIÓN DEL ORDEN (a partir del ancho de transición)
+# ============================================================
+# scipy no tiene un "chebwinord" que estime el N automáticamente como
+# kaiserord, así que usamos kaiserord solo para estimar cuántos taps
+# hacen falta para esa transición y esa atenuación, y ese N se lo
+# pasamos a la ventana Chebyshev.
+
+width = (fstop - fp) / f_nyquist   # ancho de transición normalizado (0..1)
+
+numtaps, _ = sig.kaiserord(gstop, width)
+
+# numtaps impar -> fase lineal tipo I (taps simétricos)
+if numtaps % 2 == 0:
+    numtaps += 1
+
+
+# ============================================================
+# DISEÑO DEL FILTRO FIR (VENTANA DOLPH-CHEBYSHEV)
+# ============================================================
+
+fc = (fp + fstop) / 2   # frecuencia de corte: punto medio pasante/rechazo
+
+taps = sig.firwin(
+    numtaps,
+    fc,
+    window=('chebwin', gstop),   # ventana Chebyshev, atenuación = gstop [dB]
+    fs=fs
+)
+
+
+# ============================================================
+# INFORMACIÓN DEL FILTRO
+# ============================================================
+
+print("==============================================")
+print(" FILTRO FIR - VENTANA DOLPH-CHEBYSHEV")
+print("==============================================")
+print(f"Frecuencia de muestreo  = {fs:.1f} Hz")
+print(f"Frecuencia de Nyquist   = {f_nyquist:.1f} Hz")
+print(f"Frecuencia pasante      = {fp:.1f} Hz")
+print(f"Frecuencia de rechazo   = {fstop:.1f} Hz")
+print(f"Frecuencia de corte     = {fc:.1f} Hz")
+print(f"Atenuación (ripple cte) = {gstop:.1f} dB")
+print(f"Cantidad de taps (orden)= {numtaps}")
+
+
+# ============================================================
+# IMPRESIÓN DEL ARRAY EN FORMATO C / CMSIS
+# ============================================================
+
+nombre_array = "float_fir_taps"
+
+print("\n// ==============================================")
+print(f"// Coeficientes listos para CMSIS-DSP (arm_fir_f32)")
+print(f"// Respuesta tipo Chebyshev (ventana Dolph-Chebyshev)")
+print(f"// FIR_TAP_NUM = {numtaps}")
+print("// ==============================================\n")
+
+lines = []
+lines.append(f"float32_t {nombre_array}[FIR_TAP_NUM] =")
+lines.append("{")
+for i, v in enumerate(taps):
+    coma = "," if i < len(taps) - 1 else ""
+    lines.append(f"    {v: .8e}f{coma}")
+lines.append("};")
+
+c_array_text = "\n".join(lines)
+print(c_array_text)
+
+
+# ============================================================
+# RESPUESTA EN FRECUENCIA
+# ============================================================
+
+w, h = sig.freqz(taps, worN=4096, fs=fs)
+H_dB = 20 * np.log10(np.maximum(np.abs(h), 1e-12))
+
+w_normalizada = w / f_nyquist
+fp_normalizada = fp / f_nyquist
+fstop_normalizada = fstop / f_nyquist
+
+plt.figure(figsize=(10, 6))
+plt.plot(w_normalizada, H_dB, label='FIR - Dolph-Chebyshev')
+plt.axvline(fp_normalizada, linestyle='--', label='fp = 100 Hz')
+plt.axvline(fstop_normalizada, linestyle='--', label='fstop = 300 Hz')
+plt.axhline(-gpass, linestyle=':', label='-1 dB')
+plt.axhline(-gstop, linestyle=':', label='-60 dB')
+
+plt.title('Filtro FIR pasa-bajos (Dolph-Chebyshev)')
+plt.xlabel('Frecuencia normalizada respecto de Nyquist')
+plt.ylabel('Magnitud [dB]')
+plt.xlim(0, 1)
+plt.ylim(-100, 5)
+plt.grid(True)
+plt.legend()
+plt.show()
+
+
+
+
+#%%
+"fir 20k cheby no tan cheby"
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Diseño de filtro FIR pasa-bajos (ventana Kaiser) + generación de
+coeficientes en formato C para CMSIS-DSP (arm_fir_f32)
+"""
+
+import numpy as np
+import scipy.signal as sig
+import matplotlib.pyplot as plt
+
+
+# ============================================================
+# ESPECIFICACIONES DEL FILTRO
+# ============================================================
+
+fs = 20000.0          # Frecuencia de muestreo [Hz]
+f_nyquist = fs / 2
+
+fp = 100.0             # Fin de banda pasante [Hz]
+fstop = 300.0          # Inicio de banda de rechazo [Hz]
+
+gpass = 1.0            # Ripple máximo en banda pasante [dB] (no lo usa Kaiser directamente,
+                        # Kaiser solo pide la atenuación de rechazo; lo dejamos para referencia)
+gstop = 60.0           # Atenuación mínima en banda de rechazo [dB]
+
+
+# ============================================================
+# DISEÑO DEL FILTRO FIR (VENTANA KAISER)
+# ============================================================
+
+# Ancho de banda de transición
+width = (fstop - fp) / f_nyquist   # normalizado respecto a Nyquist (0..1)
+
+# kaiserord estima el orden N y el beta de la ventana necesarios
+# para lograr 'gstop' dB de atenuación con ese ancho de transición
+numtaps, beta = sig.kaiserord(gstop, width)
+
+# numtaps debe ser impar para fase lineal tipo I (garantiza taps simétricos)
+if numtaps % 2 == 0:
+    numtaps += 1
+
+# Frecuencia de corte: punto medio entre fp y fstop
+fc = (fp + fstop) / 2
+
+taps = sig.firwin(
+    numtaps,
+    fc,
+    window=('kaiser', beta),
+    fs=fs
+)
+
+
+# ============================================================
+# INFORMACIÓN DEL FILTRO
+# ============================================================
+
+print("==============================================")
+print(" FILTRO FIR - VENTANA KAISER")
+print("==============================================")
+print(f"Frecuencia de muestreo  = {fs:.1f} Hz")
+print(f"Frecuencia de Nyquist   = {f_nyquist:.1f} Hz")
+print(f"Frecuencia pasante      = {fp:.1f} Hz")
+print(f"Frecuencia de rechazo   = {fstop:.1f} Hz")
+print(f"Frecuencia de corte     = {fc:.1f} Hz")
+print(f"Atenuación mínima       = {gstop:.1f} dB")
+print(f"Beta de Kaiser          = {beta:.4f}")
+print(f"Cantidad de taps (orden)= {numtaps}")
+
+
+# ============================================================
+# IMPRESIÓN DEL ARRAY EN FORMATO C / CMSIS
+# ============================================================
+
+nombre_array = "float_fir_taps"
+
+print("\n// ==============================================")
+print(f"// Coeficientes listos para CMSIS-DSP (arm_fir_f32)")
+print(f"// FIR_TAP_NUM = {numtaps}")
+print("// ==============================================\n")
+
+lines = []
+lines.append(f"float32_t {nombre_array}[FIR_TAP_NUM] =")
+lines.append("{")
+for i, v in enumerate(taps):
+    coma = "," if i < len(taps) - 1 else ""
+    lines.append(f"    {v: .8e}f{coma}")
+lines.append("};")
+
+c_array_text = "\n".join(lines)
+print(c_array_text)
+
+
+# ============================================================
+# RESPUESTA EN FRECUENCIA
+# ============================================================
+
+w, h = sig.freqz(taps, worN=4096, fs=fs)
+H_dB = 20 * np.log10(np.maximum(np.abs(h), 1e-12))
+
+w_normalizada = w / f_nyquist
+fp_normalizada = fp / f_nyquist
+fstop_normalizada = fstop / f_nyquist
+
+plt.figure(figsize=(10, 6))
+plt.plot(w_normalizada, H_dB, label='FIR - Ventana Kaiser')
+plt.axvline(fp_normalizada, linestyle='--', label='fp = 100 Hz')
+plt.axvline(fstop_normalizada, linestyle='--', label='fstop = 300 Hz')
+plt.axhline(-gpass, linestyle=':', label='-1 dB')
+plt.axhline(-gstop, linestyle=':', label='-60 dB')
+
+plt.title('Filtro FIR pasa-bajos (Kaiser)')
+plt.xlabel('Frecuencia normalizada respecto de Nyquist')
+plt.ylabel('Magnitud [dB]')
+plt.xlim(0, 1)
+plt.ylim(-100, 5)
+plt.grid(True)
+plt.legend()
+plt.show()

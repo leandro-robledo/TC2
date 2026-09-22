@@ -1,0 +1,782 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Sep  2 23:17:21 2026
+
+@author: lrobledo
+"""
+#%%%
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"filtro notch max plan con iir comun"
+
+"""
+Diseño de filtro IIR NOTCH de 50 Hz para STM32
+------------------------------------------------
+
+Especificaciones:
+    fs       = 1000 Hz
+    f0       = 50 Hz
+    BW_-3dB  = 1 Hz
+    gstop    = 60 dB
+    Tipo     = Butterworth (máximamente plano)
+
+El programa:
+
+1. Diseña el filtro mediante scipy.signal.iirdesign()
+2. Ajusta automáticamente el diseño para obtener
+   BW = 1 Hz medido entre los cruces de -3 dB.
+3. Calcula la respuesta en frecuencia.
+4. Obtiene las SOS (Second Order Sections).
+5. Convierte los coeficientes al formato requerido
+   por CMSIS-DSP arm_biquad_cascade_df1_f32().
+6. Genera directamente el array C para copiar al STM32.
+"""
+
+import numpy as np
+import scipy.signal as sig
+import matplotlib.pyplot as plt
+
+
+# ============================================================
+# PARAMETROS PRINCIPALES
+# ============================================================
+
+fs = 1000.0          # Frecuencia de muestreo [Hz]
+f0 = 50.0            # Frecuencia central del notch [Hz]
+
+BW_objetivo = 1.0    # Ancho de banda a -3 dB [Hz]
+
+gpass = 3.0          # Máxima atenuación permitida en pasabanda [dB]
+gstop = 60.0         # Mínima atenuación en banda eliminada [dB]
+
+# ============================================================
+# BANDA DE STOP
+# ============================================================
+#
+# La banda eliminada se coloca alrededor de 50 Hz.
+#
+# Cuanto más angosta sea esta banda, mayor será el orden
+# necesario para conseguir 60 dB de rechazo.
+#
+# Acá exigimos 60 dB alrededor de:
+#
+#       49.9 Hz ---------------- 50.1 Hz
+#
+# ============================================================
+
+stop_half_width = 0.1
+
+f_stop_low = f0 - stop_half_width
+f_stop_high = f0 + stop_half_width
+
+
+# ============================================================
+# FUNCION PARA DISEÑAR EL FILTRO
+# ============================================================
+
+def diseñar_filtro(delta_wp):
+
+    """
+    Diseña un filtro Butterworth mediante iirdesign.
+
+    delta_wp define la separación de las frecuencias
+    pasabanda respecto de 50 Hz.
+
+    wp = [50-delta_wp, 50+delta_wp]
+
+    ws = [49.9, 50.1]
+    """
+
+    f_pass_low = f0 - delta_wp
+    f_pass_high = f0 + delta_wp
+
+    sos = sig.iirdesign(
+        wp=[f_pass_low, f_pass_high],
+        ws=[f_stop_low, f_stop_high],
+        gpass=gpass,
+        gstop=gstop,
+        analog=False,
+        ftype='butter',
+        output='sos',
+        fs=fs
+    )
+
+    return sos
+
+
+# ============================================================
+# CALCULAR FRECUENCIAS DE CORTE A -3 dB
+# ============================================================
+
+def calcular_cruces_3dB(sos):
+
+    """
+    Busca las dos frecuencias donde la respuesta cruza
+    -3 dB alrededor del notch.
+
+    Devuelve:
+
+        f_izquierda
+        f_derecha
+        BW
+
+    """
+
+    # Resolución muy alta alrededor del notch
+    f = np.linspace(48.0, 52.0, 400001)
+
+    w, h = sig.sosfreqz(
+        sos,
+        worN=f,
+        fs=fs
+    )
+
+    H_dB = 20 * np.log10(
+        np.maximum(np.abs(h), 1e-300)
+    )
+
+    nivel = -3.0
+
+    # --------------------------------------------------------
+    # Cruce izquierdo
+    # --------------------------------------------------------
+
+    indices_izq = np.where(
+        (H_dB[:-1] >= nivel) &
+        (H_dB[1:] < nivel)
+    )[0]
+
+    # --------------------------------------------------------
+    # Cruce derecho
+    # --------------------------------------------------------
+
+    indices_der = np.where(
+        (H_dB[:-1] < nivel) &
+        (H_dB[1:] >= nivel)
+    )[0]
+
+    if len(indices_izq) == 0 or len(indices_der) == 0:
+        return None
+
+    i = indices_izq[-1]
+    j = indices_der[0]
+
+    # --------------------------------------------------------
+    # Interpolación lineal para encontrar exactamente -3 dB
+    # --------------------------------------------------------
+
+    f_izquierda = (
+        f[i]
+        + (nivel - H_dB[i])
+        * (f[i+1] - f[i])
+        / (H_dB[i+1] - H_dB[i])
+    )
+
+    f_derecha = (
+        f[j]
+        + (nivel - H_dB[j])
+        * (f[j+1] - f[j])
+        / (H_dB[j+1] - H_dB[j])
+    )
+
+    BW = f_derecha - f_izquierda
+
+    return f_izquierda, f_derecha, BW
+
+
+# ============================================================
+# AJUSTE AUTOMATICO DEL BW
+# ============================================================
+
+print("\n==============================================")
+print(" AJUSTE AUTOMATICO DEL ANCHO DE BANDA")
+print("==============================================")
+
+# Rango inicial de búsqueda
+delta_min = 0.45
+delta_max = 0.55
+
+# Búsqueda binaria
+for _ in range(35):
+
+    delta = (delta_min + delta_max) / 2.0
+
+    sos_temp = diseñar_filtro(delta)
+
+    resultado = calcular_cruces_3dB(sos_temp)
+
+    if resultado is None:
+        raise RuntimeError(
+            "No se encontraron los cruces de -3 dB."
+        )
+
+    f1_temp, f2_temp, BW_temp = resultado
+
+    if BW_temp < BW_objetivo:
+
+        # Necesitamos aumentar el ancho
+        delta_min = delta
+
+    else:
+
+        # Necesitamos reducir el ancho
+        delta_max = delta
+
+
+# ============================================================
+# DISEÑO FINAL
+# ============================================================
+
+delta_final = (delta_min + delta_max) / 2.0
+
+sos = diseñar_filtro(delta_final)
+
+resultado = calcular_cruces_3dB(sos)
+
+if resultado is None:
+    raise RuntimeError(
+        "No se pudieron encontrar los cruces de -3 dB."
+    )
+
+f_3dB_low, f_3dB_high, BW_real = resultado
+
+
+# ============================================================
+# INFORMACION DEL FILTRO
+# ============================================================
+
+print("\n==============================================")
+print(" ESPECIFICACIONES")
+print("==============================================")
+
+print(f"Frecuencia de muestreo : {fs:.3f} Hz")
+print(f"Frecuencia notch       : {f0:.3f} Hz")
+print(f"BW objetivo            : {BW_objetivo:.6f} Hz")
+print(f"BW obtenido            : {BW_real:.6f} Hz")
+
+print(f"\nCruce -3 dB izquierdo  : {f_3dB_low:.9f} Hz")
+print(f"Cruce -3 dB derecho    : {f_3dB_high:.9f} Hz")
+
+print(f"\nBanda STOP:")
+print(f"    {f_stop_low:.3f} Hz")
+print(f"    {f_stop_high:.3f} Hz")
+
+print(f"\ngpass = {gpass:.2f} dB")
+print(f"gstop = {gstop:.2f} dB")
+
+print(f"\nCantidad de SOS        : {len(sos)}")
+print(f"Orden del filtro       : {2 * len(sos)}")
+print(f"Coeficientes CMSIS     : {5 * len(sos)}")
+
+
+# ============================================================
+# MOSTRAR SOS
+# ============================================================
+
+print("\n==============================================")
+print(" SECOND ORDER SECTIONS (SOS)")
+print("==============================================")
+
+np.set_printoptions(
+    precision=12,
+    suppress=False
+)
+
+print(sos)
+
+
+# ============================================================
+# RESPUESTA EN FRECUENCIA
+# ============================================================
+
+w, h = sig.sosfreqz(
+    sos,
+    worN=200000,
+    fs=fs
+)
+
+H_dB = 20 * np.log10(
+    np.maximum(np.abs(h), 1e-300)
+)
+
+
+# ============================================================
+# MEDICIONES IMPORTANTES
+# ============================================================
+
+def magnitud_dB(frecuencia):
+
+    _, hh = sig.sosfreqz(
+        sos,
+        worN=[frecuencia],
+        fs=fs
+    )
+
+    return 20 * np.log10(
+        max(abs(hh[0]), 1e-300)
+    )
+
+
+print("\n==============================================")
+print(" VERIFICACION")
+print("==============================================")
+
+print(
+    f"Ganancia en 49 Hz   : "
+    f"{magnitud_dB(49.0):.6f} dB"
+)
+
+print(
+    f"Ganancia en 49.5 Hz : "
+    f"{magnitud_dB(49.5):.6f} dB"
+)
+
+print(
+    f"Ganancia en 50 Hz   : "
+    f"{magnitud_dB(50.0):.6f} dB"
+)
+
+print(
+    f"Ganancia en 50.5 Hz : "
+    f"{magnitud_dB(50.5):.6f} dB"
+)
+
+print(
+    f"Ganancia en 51 Hz   : "
+    f"{magnitud_dB(51.0):.6f} dB"
+)
+
+print(
+    f"Ganancia en 49.9 Hz : "
+    f"{magnitud_dB(49.9):.6f} dB"
+)
+
+print(
+    f"Ganancia en 50.1 Hz : "
+    f"{magnitud_dB(50.1):.6f} dB"
+)
+
+
+# ============================================================
+# GRAFICO
+# ============================================================
+
+plt.figure(figsize=(11, 6))
+
+plt.plot(
+    w,
+    H_dB,
+    linewidth=1.5
+)
+
+# Frecuencia central
+plt.axvline(
+    f0,
+    linestyle='--',
+    label='50 Hz'
+)
+
+# Cruces -3 dB
+plt.axvline(
+    f_3dB_low,
+    linestyle='--',
+    label='-3 dB'
+)
+
+plt.axvline(
+    f_3dB_high,
+    linestyle='--'
+)
+
+# Banda STOP
+plt.axvline(
+    f_stop_low,
+    linestyle=':'
+)
+
+plt.axvline(
+    f_stop_high,
+    linestyle=':'
+)
+
+# Nivel -3 dB
+plt.axhline(
+    -3,
+    linestyle='--'
+)
+
+# Nivel -60 dB
+plt.axhline(
+    -60,
+    linestyle=':'
+)
+
+plt.xlim(45, 55)
+plt.ylim(-100, 5)
+
+plt.xlabel("Frecuencia [Hz]")
+plt.ylabel("Magnitud [dB]")
+
+plt.title(
+    f"Filtro IIR Butterworth Notch - "
+    f"50 Hz - BW(-3 dB) = {BW_real:.6f} Hz"
+)
+
+plt.grid()
+
+plt.legend()
+
+plt.tight_layout()
+
+plt.show()
+
+
+# ============================================================
+# CONVERSION A COEFICIENTES CMSIS-DSP
+# ============================================================
+
+cmsis_coeffs = []
+
+for section in sos:
+
+    b0, b1, b2, a0, a1, a2 = section
+
+    # --------------------------------------------------------
+    # Normalización por a0
+    # --------------------------------------------------------
+
+    b0 /= a0
+    b1 /= a0
+    b2 /= a0
+
+    a1 /= a0
+    a2 /= a0
+
+    # --------------------------------------------------------
+    # CMSIS-DSP
+    #
+    # arm_biquad_cascade_df1_f32 utiliza:
+    #
+    # {b0, b1, b2, a1, a2}
+    #
+    # pero CMSIS utiliza signos opuestos para los coeficientes
+    # de realimentación respecto de la convención de SciPy.
+    # --------------------------------------------------------
+
+    cmsis_coeffs.extend([
+        b0,
+        b1,
+        b2,
+        -a1,
+        -a2
+    ])
+
+
+# ============================================================
+# MOSTRAR COEFICIENTES CMSIS
+# ============================================================
+
+print("\n==============================================")
+print(" COEFICIENTES CMSIS-DSP")
+print("==============================================")
+
+for i, c in enumerate(cmsis_coeffs):
+
+    print(
+        f"{i:2d}: {c:.12e}"
+    )
+
+
+# ============================================================
+# FORMATO C
+# ============================================================
+
+print("\n==============================================")
+print(" ARRAY PARA STM32")
+print("==============================================\n")
+
+print(
+    f"#define IIR_SOS_NUM {len(sos)}"
+)
+
+print(
+    f"#define IIR_TAP_NUM {5 * len(sos)}"
+)
+
+print()
+
+print(
+    "float32_t float_iir_taps[IIR_TAP_NUM] ="
+)
+
+print("{")
+
+for i, c in enumerate(cmsis_coeffs):
+
+    if i < len(cmsis_coeffs) - 1:
+
+        print(
+            f"    {c:.12e}f,"
+        )
+
+    else:
+
+        print(
+            f"    {c:.12e}f"
+        )
+
+print("};")
+
+
+# ============================================================
+# ESTADO CMSIS
+# ============================================================
+
+print("\n==============================================")
+print(" MEMORIA DE ESTADO")
+print("==============================================")
+
+print(
+    f"\nPara {len(sos)} biquads:"
+)
+
+print(
+    f"float32_t iir_state[{4 * len(sos)}] = {{0}};"
+)
+
+print("\n==============================================")
+print(" FIN")
+print("==============================================")
+
+
+#%%
+
+
+"filtro notch con iir cheby"
+
+import numpy as np
+import scipy.signal as sig
+import matplotlib.pyplot as plt
+
+# ============================================================
+# PARAMETROS
+# ============================================================
+
+fs = 1000.0       # Frecuencia de muestreo [Hz]
+
+# Notch centrado en 50 Hz
+f_notch_low = 49.5
+f_notch_high = 50.5
+
+# Bandas de transición
+f_pass_low = 49.0
+f_pass_high = 51.0
+
+# Atenuaciones
+gpass = 1.0       # Atenuación máxima en banda pasante [dB]
+gstop = 60.0      # Atenuación mínima en banda eliminada [dB]
+
+
+# ============================================================
+# DISEÑO DEL FILTRO NOTCH
+# ============================================================
+
+sos = sig.iirdesign(
+    wp=[f_pass_low, f_pass_high],
+    ws=[f_notch_low, f_notch_high],
+    gpass=gpass,
+    gstop=gstop,
+    analog=False,
+    ftype='cheby1',
+    output='sos',
+    fs=fs
+)
+
+
+# ============================================================
+# MOSTRAR SOS
+# ============================================================
+
+print("\nSOS obtenidas:")
+print(sos)
+
+print("\nCantidad de SOS:", len(sos))
+print("Cantidad de coeficientes CMSIS:", len(sos) * 5)
+
+
+# ============================================================
+# RESPUESTA EN FRECUENCIA
+# ============================================================
+
+w, h = sig.sosfreqz(
+    sos,
+    worN=10000,
+    fs=fs
+)
+
+H_dB = 20 * np.log10(np.maximum(np.abs(h), 1e-12))
+
+
+# ============================================================
+# GRAFICO
+# ============================================================
+
+plt.figure(figsize=(10, 6))
+
+plt.plot(w, H_dB)
+
+plt.axvline(49.5, linestyle='--')
+plt.axvline(50.0, linestyle='--')
+plt.axvline(50.5, linestyle='--')
+
+plt.axhline(-60, linestyle='--')
+
+plt.xlim(45, 55)
+plt.ylim(-100, 5)
+
+plt.xlabel("Frecuencia [Hz]")
+plt.ylabel("Magnitud [dB]")
+plt.title("Filtro IIR Notch - 50 Hz")
+plt.grid()
+
+plt.show()
+
+
+# ============================================================
+# CONVERSION A COEFICIENTES CMSIS-DSP
+# ============================================================
+
+cmsis_coeffs = []
+
+for section in sos:
+
+    b0, b1, b2, a0, a1, a2 = section
+
+    # Normalizar por a0
+    b0 /= a0
+    b1 /= a0
+    b2 /= a0
+    a1 /= a0
+    a2 /= a0
+
+    # CMSIS:
+    # {b0, b1, b2, a1, a2}
+    #
+    # Se invierte el signo de a1 y a2
+    cmsis_coeffs.extend([
+        b0,
+        b1,
+        b2,
+        -a1,
+        -a2
+    ])
+
+
+# ============================================================
+# MOSTRAR COEFICIENTES
+# ============================================================
+
+print("\nCoeficientes para CMSIS-DSP:\n")
+
+for i, c in enumerate(cmsis_coeffs):
+    print(f"{i}: {c:.10e}")
+
+
+# ============================================================
+# FORMATO C
+# ============================================================
+
+print("\nArray para C:\n")
+
+print("float32_t float_iir_taps[] =")
+print("{")
+
+for i, c in enumerate(cmsis_coeffs):
+
+    if i < len(cmsis_coeffs) - 1:
+        print(f"    {c:.10e}f,")
+    else:
+        print(f"    {c:.10e}f")
+
+print("};")
+
+
+#%%
+
+"filtro notch con iir notch"
+
+import numpy as np
+import scipy.signal as sig
+import matplotlib.pyplot as plt
+
+# ============================================================
+# PARAMETROS
+# ============================================================
+
+fs = 1000.0       # Hz
+f0 = 50.0         # Hz
+BW = 1.0          # Hz
+
+Q = f0 / BW
+
+print("Q =", Q)
+
+
+# ============================================================
+# DISEÑO DEL NOTCH
+# ============================================================
+
+b, a = sig.iirnotch(
+    w0=f0,
+    Q=Q,
+    fs=fs
+)
+
+print("\nCoeficientes:")
+print("b =", b)
+print("a =", a)
+
+
+# ============================================================
+# RESPUESTA EN FRECUENCIA
+# ============================================================
+
+w, h = sig.freqz(
+    b,
+    a,
+    worN=10000,
+    fs=fs
+)
+
+H_dB = 20*np.log10(np.maximum(np.abs(h), 1e-12))
+
+
+# ============================================================
+# GRAFICO
+# ============================================================
+
+plt.figure(figsize=(10,6))
+
+plt.plot(w, H_dB)
+
+plt.axvline(49.5, linestyle='--')
+plt.axvline(50.0, linestyle='--')
+plt.axvline(50.5, linestyle='--')
+
+plt.axhline(-3, linestyle='--')
+
+plt.xlim(45, 55)
+plt.ylim(-80, 5)
+
+plt.xlabel("Frecuencia [Hz]")
+plt.ylabel("Magnitud [dB]")
+plt.title("Filtro Notch de 50 Hz - BW = 1 Hz")
+plt.grid()
+
+plt.show()
+
+
+
